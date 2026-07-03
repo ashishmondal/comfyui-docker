@@ -7,6 +7,18 @@ on:
     paths:
       - 'docker-bake.hcl'
   workflow_dispatch:
+    inputs:
+      target:
+        description: Docker bake target to build and push
+        required: true
+        default: cu124-py311
+        type: choice
+        options:
+          - cu124-py311
+          - cu124-py312
+          - cu128-py311
+          - cu128-py312
+          - all
 
 jobs:
   detect-changes:
@@ -14,12 +26,25 @@ jobs:
     outputs:
       release: ${{ steps.extract.outputs.release }}
       release_suffix: ${{ steps.extract.outputs.release_suffix }}
+      target: ${{ steps.target.outputs.target }}
       should_build: ${{ steps.check.outputs.should_build }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
+
+      - name: Determine build target
+        id: target
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TARGET="${{ github.event.inputs.target }}"
+          else
+            TARGET="all"
+          fi
+
+          echo "target=${TARGET}" >> $GITHUB_OUTPUT
+          echo "Selected target: ${TARGET}"
 
       - name: Extract RELEASE and RELEASE_SUFFIX from docker-bake.hcl
         id: extract
@@ -111,47 +136,44 @@ jobs:
           REGISTRY: ghcr.io
           REGISTRY_USER: ${{ github.repository_owner }}
         run: |
-          # Build images one at a time to avoid resource exhaustion
-          # Each image is 12-14GB so parallel builds would fail
+          TARGET="${{ needs.detect-changes.outputs.target }}"
 
-          echo "Building cu124-py311..."
-          docker buildx bake --push cu124-py311
-          docker buildx prune -af
-          df -h
+          if [ "${TARGET}" = "all" ]; then
+            TARGETS=(cu124-py311 cu124-py312 cu128-py311 cu128-py312)
+          else
+            TARGETS=("${TARGET}")
+          fi
 
-          echo "Building cu124-py312..."
-          docker buildx bake --push cu124-py312
-          docker buildx prune -af
-          df -h
+          # Build images one at a time to avoid resource exhaustion.
+          for target in "${TARGETS[@]}"; do
+            echo "Building ${target}..."
+            docker buildx bake --push "${target}"
+            docker buildx prune -af
+            df -h
+          done
 
-          echo "Building cu128-py311..."
-          docker buildx bake --push cu128-py311
-          docker buildx prune -af
-          df -h
-
-          echo "Building cu128-py312..."
-          docker buildx bake --push cu128-py312
-          docker buildx prune -af
-          df -h
-
-          echo "All images built successfully!"
+          echo "Build completed for: ${TARGETS[*]}"
 
       - name: List built images
         id: list-images
         run: |
           RELEASE="${{ needs.detect-changes.outputs.release }}"
           RELEASE_SUFFIX="${{ needs.detect-changes.outputs.release_suffix }}"
+          TARGET="${{ needs.detect-changes.outputs.target }}"
           REGISTRY="ghcr.io"
           REGISTRY_USER="${{ github.repository_owner }}"
           APP="comfyui"
 
-          # Create array of images
-          IMAGES=(
-            "${REGISTRY}/${REGISTRY_USER}/${APP}:cu124-py311-${RELEASE}${RELEASE_SUFFIX}"
-            "${REGISTRY}/${REGISTRY_USER}/${APP}:cu124-py312-${RELEASE}${RELEASE_SUFFIX}"
-            "${REGISTRY}/${REGISTRY_USER}/${APP}:cu128-py311-${RELEASE}${RELEASE_SUFFIX}"
-            "${REGISTRY}/${REGISTRY_USER}/${APP}:cu128-py312-${RELEASE}${RELEASE_SUFFIX}"
-          )
+          if [ "${TARGET}" = "all" ]; then
+            TARGETS=(cu124-py311 cu124-py312 cu128-py311 cu128-py312)
+          else
+            TARGETS=("${TARGET}")
+          fi
+
+          IMAGES=()
+          for target in "${TARGETS[@]}"; do
+            IMAGES+=("${REGISTRY}/${REGISTRY_USER}/${APP}:${target}-${RELEASE}${RELEASE_SUFFIX}")
+          done
 
           # Create newline-separated list
           IMAGES_LIST=$(printf '%s\n' "${IMAGES[@]}")
